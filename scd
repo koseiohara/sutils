@@ -34,6 +34,4 @@ scd()
 
     [ -n "$scd_directory" ] || return 1
     builtin cd -- "$scd_directory" || return
-    printf '%s\n' "$PWD"
-    command ls
 }
