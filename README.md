@@ -45,12 +45,12 @@ The Python implementation uses only the Python standard library.
 
 ## Usage
 
-The shell files and Python modules may be installed at any absolute path. No particular installation directory, directory name, or installation-directory environment variable is required.
+The shell sources and Python modules are stored under `src/`. The project directory may be installed at any absolute path and may have any name. No installation-directory environment variable is required.
 
 Source the loader from `~/.zshrc` or `~/.bashrc` using its actual path:
 
 ```sh
-source "/actual/path/to/the/sutils-file"
+source "/actual/path/to/project/src/sutils"
 ```
 
 The loader resolves `srun`, `scd`, and `stodo` from its own location.
@@ -58,9 +58,9 @@ The loader resolves `srun`, `scd`, and `stodo` from its own location.
 Alternatively, source each wrapper using its actual path:
 
 ```sh
-source "/actual/path/to/the/srun-file"
-source "/actual/path/to/the/scd-file"
-source "/actual/path/to/the/stodo-file"
+source "/actual/path/to/project/src/srun"
+source "/actual/path/to/project/src/scd"
+source "/actual/path/to/project/src/stodo"
 ```
 
 Each wrapper resolves its Python module from its own location.
@@ -272,7 +272,7 @@ The target must exist and must be a directory.
 scd KEY
 ```
 
-The stored path is retrieved through `sclipple`. `scd` then changes the calling shell’s directory using `builtin cd`.
+The stored path is retrieved through `sclipple`. `scd` then changes the calling shell's directory using `builtin cd`.
 
 After a successful change, it prints the new working directory and runs `ls`.
 
@@ -657,7 +657,7 @@ Unlike `stodo remove`, this is not a status change.
 stodo history [KEY]
 ```
 
-Without a key, all recorded events are printed. With a key, only that task’s events are printed.
+Without a key, all recorded events are printed. With a key, only that task's events are printed.
 
 #### Selectors
 
@@ -702,10 +702,3 @@ The executable used for `sclipple` may be overridden:
 export SCLIPPLE=/path/to/sclipple
 ```
 
-## Summary
-
-- No installation directory is fixed.
-- No installation-directory environment variable is required.
-- The loader and wrappers resolve their companion files from their own locations.
-- `srun` and `scd` retain their fixed data directories.
-- `stodo` uses its task data directory independently of the installation path.

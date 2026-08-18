@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+
+    steps:
+      - name: Check out sutils
+        uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake zsh
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install autoconf automake
+
+      - name: Check out sclipple
+        uses: actions/checkout@v7
+        with:
+          repository: koseiohara/sclipple
+          path: .ci/sclipple
+
+      - name: Build and test sclipple
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd .ci/sclipple
+          autoreconf -fi
+          ./configure
+          make -j2
+          make check
+
+      - name: Run sutils tests
+        shell: bash
+        env:
+          SCLIPPLE: ${{ github.workspace }}/.ci/sclipple/src/sclipple
+        run: python3 tests/test_sutils.py -v

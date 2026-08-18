@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = PROJECT_ROOT / "src"
 SHELLS = ("bash", "zsh")
 WRAPPER_FILES = ("sutils", "srun", "scd", "stodo")
 
@@ -30,8 +31,9 @@ class TestEnvironment:
         self.todo.parent.mkdir(exist_ok=True)
 
         for name in (*WRAPPER_FILES, "README.md"):
-            shutil.copy2(PROJECT_ROOT / name, self.root / name)
-        shutil.copytree(PROJECT_ROOT / "sutil_modules", self.root / "sutil_modules")
+            source = PROJECT_ROOT / name if name == "README.md" else SOURCE_ROOT / name
+            shutil.copy2(source, self.root / name)
+        shutil.copytree(SOURCE_ROOT / "sutil_modules", self.root / "sutil_modules")
 
         # Commands that intentionally open an editor must remain noninteractive
         # in CI. This is an ordinary sclipple configuration, not a wrapper hook.
@@ -47,7 +49,11 @@ class TestEnvironment:
                 "HOME": str(self.home),
                 "SCLIPPLE": str(Path(sclipple).resolve()),
                 "STODO_DIR": str(self.todo),
-                "SUTILS_TEST_ROOT": str(self.root),
+                # The wrappers intentionally resolve their own locations with
+                # cd -P.  macOS exposes temporary directories through /var,
+                # while their physical path begins with /private/var.  Compare
+                # against the same physical path representation.
+                "SUTILS_TEST_ROOT": str(self.root.resolve()),
                 "SUTILS_TEST_TARGET": str(self.target),
                 # A stale legacy value must have no effect.
                 "SUTILS_ROOT": "/definitely/not/the/install/directory",
@@ -107,7 +113,7 @@ class SutilsTests(unittest.TestCase):
             executable = shutil.which(shell)
             self.assertIsNotNone(executable, f"missing shell: {shell}")
             result = subprocess.run(
-                [executable, "-n", *(str(PROJECT_ROOT / name) for name in WRAPPER_FILES)],
+                [executable, "-n", *(str(SOURCE_ROOT / name) for name in WRAPPER_FILES)],
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -122,7 +128,7 @@ class SutilsTests(unittest.TestCase):
             "/any/directory/sutils",
         )
         for path in (
-            *(PROJECT_ROOT / name for name in WRAPPER_FILES),
+            *(SOURCE_ROOT / name for name in WRAPPER_FILES),
             PROJECT_ROOT / "README.md",
         ):
             contents = path.read_text(encoding="utf-8")
@@ -141,7 +147,7 @@ class SutilsTests(unittest.TestCase):
             "sys",
             "tempfile",
         }
-        for path in (PROJECT_ROOT / "sutil_modules").glob("*.py"):
+        for path in (SOURCE_ROOT / "sutil_modules").glob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             imports = set()
             for node in ast.walk(tree):
@@ -158,9 +164,21 @@ class SutilsTests(unittest.TestCase):
                 result = environment.run(
                     shell,
                     r'''
-test "$_SUTILS_SRUN_ROOT" = "$SUTILS_TEST_ROOT" || exit 11
-test "$_SUTILS_SCD_ROOT" = "$SUTILS_TEST_ROOT" || exit 12
-test "$_SUTILS_STODO_ROOT" = "$SUTILS_TEST_ROOT" || exit 13
+if test "$_SUTILS_SRUN_ROOT" != "$SUTILS_TEST_ROOT"; then
+    printf 'srun root mismatch: expected <%s>, actual <%s>\n' \
+        "$SUTILS_TEST_ROOT" "$_SUTILS_SRUN_ROOT" >&2
+    exit 11
+fi
+if test "$_SUTILS_SCD_ROOT" != "$SUTILS_TEST_ROOT"; then
+    printf 'scd root mismatch: expected <%s>, actual <%s>\n' \
+        "$SUTILS_TEST_ROOT" "$_SUTILS_SCD_ROOT" >&2
+    exit 12
+fi
+if test "$_SUTILS_STODO_ROOT" != "$SUTILS_TEST_ROOT"; then
+    printf 'stodo root mismatch: expected <%s>, actual <%s>\n' \
+        "$SUTILS_TEST_ROOT" "$_SUTILS_STODO_ROOT" >&2
+    exit 13
+fi
 cd / || exit 14
 type srun >/dev/null || exit 15
 type scd >/dev/null || exit 16
