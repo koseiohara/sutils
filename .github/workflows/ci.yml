@@ -59,3 +59,5 @@ jobs:
         env:
           SCLIPPLE: ${{ github.workspace }}/.ci/sclipple/src/sclipple
         run: python3 tests/test_sutils.py -v
+
+
