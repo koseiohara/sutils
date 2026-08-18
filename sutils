@@ -1,9 +1,20 @@
-# Source this file from ~/.zshrc or ~/.bashrc.
-# The installation directory is intentionally fixed by default.
-if [ -z "${SUTILS_ROOT+x}" ]; then
-    SUTILS_ROOT="$HOME/local/sutils"
+# Source this file from ~/.zshrc or ~/.bashrc. Locate the other files relative
+# to this loader so the whole directory can be installed anywhere.
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '_sutils_source=${${(%):-%x}:A}'
+elif [ -n "${BASH_VERSION-}" ]; then
+    _sutils_source=${BASH_SOURCE[0]}
+else
+    printf '%s\n' 'sutils: only Bash and zsh are supported' >&2
+    return 2
 fi
 
-source "$SUTILS_ROOT/srun"
-source "$SUTILS_ROOT/scd"
-source "$SUTILS_ROOT/stodo"
+_sutils_root=$(
+    builtin cd -P -- "$(dirname -- "$_sutils_source")" && pwd
+) || return
+unset _sutils_source
+
+source "$_sutils_root/srun"
+source "$_sutils_root/scd"
+source "$_sutils_root/stodo"
+unset _sutils_root

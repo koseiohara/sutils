@@ -3,7 +3,6 @@ import argparse
 import datetime as dt
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile

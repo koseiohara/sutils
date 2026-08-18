@@ -1,9 +1,22 @@
 # Source this file from Bash or zsh. Python resolves the saved directory, but
 # cd itself must remain here so it changes the caller's interactive shell.
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '_scd_source=${${(%):-%x}:A}'
+elif [ -n "${BASH_VERSION-}" ]; then
+    _scd_source=${BASH_SOURCE[0]}
+else
+    printf '%s\n' 'scd: only Bash and zsh are supported' >&2
+    return 2
+fi
+
+_SUTILS_SCD_ROOT=$(
+    builtin cd -P -- "$(dirname -- "$_scd_source")" && pwd
+) || return
+unset _scd_source
+
 scd()
 {
-    local sutils_root scd_output scd_status scd_directory scd_marker
-    sutils_root=${SUTILS_ROOT:-"$HOME/local/sutils"}
+    local scd_output scd_status scd_directory scd_marker
     scd_marker=__SCD_RESULT_V1__
 
     # FD 3 exists only for this assignment. It preserves ordinary sclipple
@@ -12,7 +25,7 @@ scd()
     {
         scd_output=$(
             command python3 \
-                "$sutils_root/sutil_modules/sutils_core.py" \
+                "$_SUTILS_SCD_ROOT/sutil_modules/sutils_core.py" \
                 scd --result-fd 4 -- "$@" \
                 4>&1 1>&3
         )
@@ -34,4 +47,5 @@ scd()
 
     [ -n "$scd_directory" ] || return 1
     builtin cd -- "$scd_directory" || return
+    printf 'cd %s\n' "$PWD"
 }

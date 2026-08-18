@@ -1,7 +1,19 @@
 # Source this file from Bash or zsh.
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '_stodo_source=${${(%):-%x}:A}'
+elif [ -n "${BASH_VERSION-}" ]; then
+    _stodo_source=${BASH_SOURCE[0]}
+else
+    printf '%s\n' 'stodo: only Bash and zsh are supported' >&2
+    return 2
+fi
+
+_SUTILS_STODO_ROOT=$(
+    builtin cd -P -- "$(dirname -- "$_stodo_source")" && pwd
+) || return
+unset _stodo_source
+
 stodo()
 {
-    local sutils_root
-    sutils_root=${SUTILS_ROOT:-"$HOME/local/sutils"}
-    command python3 "$sutils_root/sutil_modules/stodo.py" "$@"
+    command python3 "$_SUTILS_STODO_ROOT/sutil_modules/stodo.py" "$@"
 }
