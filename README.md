@@ -36,7 +36,7 @@ Task data is stored in:
 
 ## Dependencies
 
-- [sclipple](https://github.com/koseiohara/sclipple) (>2.1.2)
+- [sclipple](https://github.com/koseiohara/sclipple) (>=2.1.2)
 - Python 3
 - Bash or zsh
 - A POSIX-compatible operating system
