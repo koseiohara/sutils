@@ -134,6 +134,7 @@ def run_script(shell, records):
         + str(original_stdin).encode("ascii")
         + b"\n"
         + script
+        + b"exit $?\n"
         + b"}\n"
     )
 
