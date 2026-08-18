@@ -37,7 +37,10 @@ class TestEnvironment:
 
         # Commands that intentionally open an editor must remain noninteractive
         # in CI. This is an ordinary sclipple configuration, not a wrapper hook.
-        (self.home / ".sclipplerc").write_text("editor = true\n", encoding="utf-8")
+        (self.home / ".sclipplerc").write_text(
+            "editor = true\nextension = txt\n",
+            encoding="utf-8",
+        )
 
         sclipple = os.environ.get("SCLIPPLE") or shutil.which("sclipple")
         if not sclipple:
@@ -90,8 +93,8 @@ class TestEnvironment:
             check=False,
         )
 
-    def note(self, store, key, contents):
-        path = self.home / ".local" / "share" / store / "notes" / f"{key}.txt"
+    def note(self, store, key, contents, *, extension="txt"):
+        path = self.home / ".local" / "share" / store / "notes" / f"{key}.{extension}"
         path.write_text(contents, encoding="utf-8")
 
 
@@ -208,6 +211,11 @@ stodo --help >/dev/null || exit 18
                 )
                 self.assert_success(result)
 
+                notes = environment.home / ".local/share/sclipple-run/notes"
+                for key in ("first", "second", "input", "fail", "tail", "example"):
+                    self.assertTrue(notes.joinpath(f"{key}.sh").is_file())
+                    self.assertFalse(notes.joinpath(f"{key}.txt").exists())
+
                 result = environment.run(shell, "srun edit first second >/dev/null\n")
                 self.assert_success(result)
 
@@ -215,31 +223,37 @@ stodo --help >/dev/null || exit 18
                     "sclipple-run",
                     "first",
                     "# Set shared state\nvalue=shared\nprintf 'one:%s\\n' \"$value\"\n",
+                    extension="sh",
                 )
                 environment.note(
                     "sclipple-run",
                     "second",
                     "printf 'two:%s\\n' \"$value\"\n",
+                    extension="sh",
                 )
                 environment.note(
                     "sclipple-run",
                     "input",
                     "IFS= read -r input_line\nprintf 'input:%s\\n' \"$input_line\"\n",
+                    extension="sh",
                 )
                 environment.note(
                     "sclipple-run",
                     "fail",
                     "printf 'before-failure\\n'\nfalse\n",
+                    extension="sh",
                 )
                 environment.note(
                     "sclipple-run",
                     "tail",
                     "printf 'must-not-run\\n'\n",
+                    extension="sh",
                 )
                 environment.note(
                     "sclipple-run",
                     "example",
                     "printf 'example:%s\\n' \"$PWD\"\n",
+                    extension="sh",
                 )
 
                 result = environment.run(shell, "srun first second\n")
@@ -279,6 +293,9 @@ srun git status --short >/dev/null || exit
                 self.assert_success(result)
 
                 result = environment.run(shell, "srun --directory=/tmp ls >/dev/null\n")
+                self.assertEqual(result.returncode, 2)
+
+                result = environment.run(shell, "srun --extension=txt ls >/dev/null\n")
                 self.assertEqual(result.returncode, 2)
 
                 # A pseudo-terminal keeps stdin open. This catches a regression

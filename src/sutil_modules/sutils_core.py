@@ -11,6 +11,7 @@ from pathlib import Path
 
 SCLIPPLE = os.environ.get("SCLIPPLE", "sclipple")
 SRUN_DIR = Path.home() / ".local/share/sclipple-run"
+SRUN_EXTENSION = "sh"
 SCD_DIR = Path.home() / ".local/share/sclipple-cd"
 SELF = str(Path(__file__).resolve())
 CAPTURE_MAGIC = b"SUTILS-CAPTURE-V1\0"
@@ -21,12 +22,17 @@ def error(message):
     print(f"sutils: {message}", file=sys.stderr)
 
 
-def directory_is_fixed(arguments):
+def fixed_options_are_valid(arguments, *, extension_is_fixed=False):
     for argument in arguments:
         if argument == "git":
             break
         if argument == "--directory" or argument.startswith("--directory="):
             error("the sclipple directory is fixed")
+            return False
+        if extension_is_fixed and (
+            argument == "--extension" or argument.startswith("--extension=")
+        ):
+            error(f"the srun extension is fixed to {SRUN_EXTENSION}")
             return False
     return True
 
@@ -82,28 +88,26 @@ def decode_capture(data):
     return records
 
 
-def run_sclipple(storage, arguments, *, editor=None, pass_fds=()):
+def run_sclipple(storage, arguments, *, editor=None, extension=None, pass_fds=()):
     command = [SCLIPPLE, f"--directory={storage}"]
+    if extension is not None:
+        command.append(f"--extension={extension}")
     if editor is not None:
         command.append(f"--editor={editor}")
     command.extend(arguments)
     return subprocess.run(command, pass_fds=pass_fds).returncode
 
 
-def run_sclipple_capture(storage, arguments):
+def run_sclipple_capture(storage, arguments, *, extension=None):
     read_fd, write_fd = os.pipe()
     editor = callback_command("__capture", write_fd)
 
     try:
-        process = subprocess.Popen(
-            [
-                SCLIPPLE,
-                f"--directory={storage}",
-                f"--editor={editor}",
-                *arguments,
-            ],
-            pass_fds=(write_fd,),
-        )
+        command = [SCLIPPLE, f"--directory={storage}"]
+        if extension is not None:
+            command.append(f"--extension={extension}")
+        command.extend((f"--editor={editor}", *arguments))
+        process = subprocess.Popen(command, pass_fds=(write_fd,))
     except Exception:
         os.close(read_fd)
         os.close(write_fd)
@@ -167,16 +171,24 @@ def run_script(shell, records):
 def srun(arguments, shell):
     SRUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not directory_is_fixed(arguments):
+    if not fixed_options_are_valid(arguments, extension_is_fixed=True):
         return 2
 
     if arguments[:1] == ["edit"]:
         if len(arguments) == 1:
             error("usage: srun edit KEY [KEY ...]")
             return 2
-        return run_sclipple(SRUN_DIR, arguments[1:])
+        return run_sclipple(
+            SRUN_DIR,
+            arguments[1:],
+            extension=SRUN_EXTENSION,
+        )
 
-    status, records = run_sclipple_capture(SRUN_DIR, arguments)
+    status, records = run_sclipple_capture(
+        SRUN_DIR,
+        arguments,
+        extension=SRUN_EXTENSION,
+    )
     if status != 0:
         return status
 
@@ -238,7 +250,7 @@ def write_scd_result(fd, directory):
 def scd(arguments, result_fd):
     SCD_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not directory_is_fixed(arguments):
+    if not fixed_options_are_valid(arguments):
         return 2
 
     if arguments[:1] == ["add"]:
