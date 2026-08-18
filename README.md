@@ -274,7 +274,7 @@ scd KEY
 
 The stored path is retrieved through `sclipple`. `scd` then changes the calling shell's directory using `builtin cd`.
 
-After a successful change, it prints the new working directory and runs `ls`.
+After a successful change, it prints the new working directory.
 
 Because `scd` is a shell function, the directory change remains active in the interactive shell.
 
