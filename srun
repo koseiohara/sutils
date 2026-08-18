@@ -1,0 +1,20 @@
+# Source this file from Bash or zsh. The implementation lives in Python so
+# both shells expose the same srun behavior.
+srun()
+{
+    local sutils_root srun_shell
+    sutils_root=${SUTILS_ROOT:-"$HOME/local/sutils"}
+
+    if [ -n "${ZSH_VERSION-}" ]; then
+        srun_shell=zsh
+    elif [ -n "${BASH_VERSION-}" ]; then
+        srun_shell=bash
+    else
+        printf '%s\n' 'srun: only Bash and zsh are supported' >&2
+        return 2
+    fi
+
+    command python3 \
+        "$sutils_root/sutil_modules/sutils_core.py" \
+        srun --shell "$srun_shell" -- "$@"
+}

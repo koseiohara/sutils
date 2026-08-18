@@ -1,0 +1,7 @@
+# Source this file from Bash or zsh.
+stodo()
+{
+    local sutils_root
+    sutils_root=${SUTILS_ROOT:-"$HOME/local/sutils"}
+    command python3 "$sutils_root/sutil_modules/stodo.py" "$@"
+}

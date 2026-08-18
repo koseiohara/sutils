@@ -1,0 +1,9 @@
+# Source this file from ~/.zshrc or ~/.bashrc.
+# The installation directory is intentionally fixed by default.
+if [ -z "${SUTILS_ROOT+x}" ]; then
+    SUTILS_ROOT="$HOME/local/sutils"
+fi
+
+source "$SUTILS_ROOT/srun"
+source "$SUTILS_ROOT/scd"
+source "$SUTILS_ROOT/stodo"
