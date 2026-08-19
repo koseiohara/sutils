@@ -1,353 +1,542 @@
 #!/usr/bin/env python3
+"""A task-aware, deliberately thin facade over a dedicated sclipple store."""
+
 import argparse
 import datetime as dt
+import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-SCLIPPLE = os.environ.get('SCLIPPLE', 'sclipple')
-STODO_DIR = Path(os.environ.get('STODO_DIR', str(Path.home()/'.local/share/sclipple-todo'))).expanduser()
-SENTINEL = '.stodo-root'
+SCLIPPLE = os.environ.get("SCLIPPLE", "sclipple")
+STODO_DIR = Path(os.environ.get(
+    "STODO_DIR", str(Path.home() / ".local/share/sclipple-todo")
+)).expanduser()
+STODO_EXTENSION = "txt"
+TASK_TAG = "task"
 SELF = str(Path(__file__).resolve())
-VALID_KEY = re.compile(r'^[A-Za-z0-9_-]+$')
-TERMINAL = {'done','archived','trash'}
+VALID_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+TASK_FIELDS = ("title", "created", "due", "priority", "completed")
+OWNED_COMMANDS = {"add", "ls", "show", "set", "done", "reopen"}
 
-class Error(Exception): pass
 
-def fail(msg): raise Error(msg)
+class Error(Exception):
+    pass
 
-def now(): return dt.datetime.now().astimezone().strftime('%Y-%m-%dT%H:%M:%S%z')
-def today(): return dt.date.today()
 
-def run(cmd, *, capture=False, check=True, input_text=None):
-    p = subprocess.run(cmd, text=True, input=input_text,
-                       stdout=subprocess.PIPE if capture else None,
-                       stderr=subprocess.PIPE if capture else None)
-    if check and p.returncode:
-        msg=(p.stderr or '').strip() if capture else ''
-        fail(msg or f'command failed: {cmd[0]}')
-    return p
+def fail(message):
+    raise Error(message)
 
-def check_root(require=True):
-    if not STODO_DIR.is_absolute(): fail(f'STODO_DIR must be absolute: {STODO_DIR}')
-    if require:
-        if not STODO_DIR.is_dir(): fail(f'not initialized: {STODO_DIR}; run: stodo init')
-        if not (STODO_DIR/SENTINEL).is_file(): fail(f'refusing unmarked directory: {STODO_DIR}')
 
-def init_root():
-    if STODO_DIR.exists() and not STODO_DIR.is_dir(): fail(f'not a directory: {STODO_DIR}')
-    if STODO_DIR.exists() and not (STODO_DIR/SENTINEL).exists() and any(STODO_DIR.iterdir()):
-        fail(f'refusing to mark non-empty directory: {STODO_DIR}')
+def now():
+    return dt.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def today():
+    return dt.date.today()
+
+
+def ensure_store():
+    if not STODO_DIR.is_absolute():
+        fail(f"STODO_DIR must be absolute: {STODO_DIR}")
+    if STODO_DIR.exists() and not STODO_DIR.is_dir():
+        fail(f"not a directory: {STODO_DIR}")
     STODO_DIR.mkdir(parents=True, exist_ok=True)
-    (STODO_DIR/SENTINEL).write_text('stodo private TODO database\n', encoding='utf-8')
-    print(STODO_DIR)
 
-def sclipple(*args, capture=False):
-    check_root()
-    return run([SCLIPPLE, '--directory', str(STODO_DIR), *map(str,args)], capture=capture)
+
+def fixed_options_are_valid(arguments):
+    """Keep the namespace fixed without enumerating sclipple subcommands."""
+    for argument in arguments:
+        if argument == "--directory" or argument.startswith("--directory="):
+            fail("the sclipple directory is fixed")
+        if argument == "--extension" or argument.startswith("--extension="):
+            fail(f"the stodo extension is fixed to {STODO_EXTENSION}")
+
+
+def sclipple_command(*arguments, editor=None):
+    command = [SCLIPPLE, f"--directory={STODO_DIR}",
+               f"--extension={STODO_EXTENSION}"]
+    if editor is not None:
+        command.append(f"--editor={editor}")
+    command.extend(map(str, arguments))
+    return command
+
+
+def run_sclipple(*arguments, editor=None, capture=False, check=True):
+    ensure_store()
+    fixed_options_are_valid(arguments)
+    process = subprocess.run(
+        sclipple_command(*arguments, editor=editor), text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+    if check and process.returncode:
+        message = (process.stderr or "").strip() if capture else ""
+        fail(message or "sclipple command failed")
+    return process
+
+
+def run_native(arguments):
+    if not arguments:
+        fail("native requires a sclipple command, selector, or option")
+    return run_sclipple(*arguments, check=False).returncode
+
+
+def callback_command(name, *arguments):
+    words = [sys.executable, SELF, name, *map(str, arguments)]
+    return " ".join(shlex.quote(word) for word in words)
+
+
+def callback(name, selectors, *arguments):
+    run_sclipple(*selectors, editor=callback_command(f"__{name}", *arguments))
+
 
 def list_keys():
-    # Use sclipple itself as metadata authority. Parse first column of ls.
-    p=run([SCLIPPLE,'--directory',str(STODO_DIR),'ls','-t','task'], capture=True, check=False)
-    if p.returncode:
+    """Ask sclipple for keys; never discover or construct note filenames."""
+    process = run_sclipple("ls", "--short", capture=True, check=False)
+    if process.returncode and not process.stdout.strip():
         return []
-    out=[]
-    for line in p.stdout.splitlines():
-        line=line.strip()
-        m=re.fullmatch(r'\[([A-Za-z0-9_-]+)\]', line)
-        if m:
-            out.append(m.group(1))
-    return out
+    keys = []
+    for raw_line in process.stdout.splitlines():
+        token = raw_line.strip().split(None, 1)[0] if raw_line.strip() else ""
+        if token.startswith("[") and token.endswith("]"):
+            token = token[1:-1]
+        if VALID_KEY.fullmatch(token) and token not in keys:
+            keys.append(token)
+    return keys
 
-def slugify(title):
-    s=title.lower().encode('ascii','ignore').decode()
-    s=re.sub(r'[^a-z0-9]+','-',s).strip('-')
-    return s[:48].rstrip('-')
 
-def unique_key(base, keys):
-    if base not in keys: return base
-    n=2
-    while f'{base}-{n}' in keys: n+=1
-    return f'{base}-{n}'
+def validate_key(key):
+    if not VALID_KEY.fullmatch(key) or key in {".", ".."}:
+        fail("KEY must contain only ASCII letters, digits, _ or -")
 
-def fallback_key(keys):
-    n=1
-    while f'task-{n}' in keys: n+=1
-    return f'task-{n}'
 
 def resolve_key(token, keys=None):
     keys = list_keys() if keys is None else keys
-    if token in keys: return token
-    matches=[k for k in keys if k.startswith(token)]
-    if not matches: fail(f"unknown KEY or prefix '{token}'")
-    if len(matches)>1: fail(f"ambiguous KEY prefix '{token}': {', '.join(matches)}")
+    if token in keys:
+        return token
+    matches = [key for key in keys if key.startswith(token)]
+    if not matches:
+        fail(f"unknown KEY or prefix '{token}'")
+    if len(matches) > 1:
+        fail(f"ambiguous KEY prefix '{token}': {', '.join(matches)}")
     return matches[0]
 
-def selectors(args, *, require=False):
-    parts=[]
-    keys=list_keys()
-    for k in getattr(args,'keys',[]) or []: parts.append(resolve_key(k, keys))
-    for t in getattr(args,'tags',[]) or []: parts += ['-t',t]
-    if getattr(args,'tag_match',None): parts += ['--tag-match',args.tag_match]
-    if not parts:
-        if require: fail('explicit KEY or -t TAG selector required')
-        parts=['-t','task']
-    return parts
 
-def safe_file(path):
-    p=Path(path)
-    try: rp=p.resolve(strict=True)
-    except FileNotFoundError: fail(f'missing callback file: {p}')
-    notes=(STODO_DIR/'notes').resolve()
-    if rp.parent != notes: fail(f'refusing path outside private notes directory: {p}')
-    if p.is_symlink() or not rp.is_file(): fail(f'refusing unsafe task file: {p}')
-    return rp
+def slugify(title):
+    value = title.lower().encode("ascii", "ignore").decode()
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    return value[:48].rstrip("-")
 
-def parse_task(path):
-    p=safe_file(path)
-    text=p.read_text(encoding='utf-8')
-    head, sep, body=text.partition('\n---\n')
-    d={}
-    for ln in head.splitlines():
-        if ': ' in ln:
-            k,v=ln.split(': ',1); d[k]=v
-    d['_body']=body if sep else ''
-    d['_path']=p
-    d['_key']=p.stem
-    return d
 
-def write_task(t):
-    p=t['_path']; body=t.get('_body','')
-    fields=['title','created','due','priority','status','status_since','completed','depends']
-    data=''.join(f'{k}: {t.get(k,"-")}\n' for k in fields)+'---\n'+body
-    fd,tmp=tempfile.mkstemp(prefix='.stodo-',dir=p.parent)
+def unique_key(base, keys):
+    if base not in keys:
+        return base
+    suffix = 2
+    while f"{base}-{suffix}" in keys:
+        suffix += 1
+    return f"{base}-{suffix}"
+
+
+def fallback_key(keys):
+    suffix = 1
+    while f"task-{suffix}" in keys:
+        suffix += 1
+    return f"task-{suffix}"
+
+
+def parse_date(value, field="due"):
+    if value == "-":
+        return None
     try:
-        with os.fdopen(fd,'w',encoding='utf-8') as f: f.write(data)
-        os.replace(tmp,p)
+        return dt.date.fromisoformat(value)
+    except ValueError:
+        fail(f"invalid {field}: {value}; expected YYYY-MM-DD or -")
+
+
+def validate_timestamp(value, field):
+    if value == "-":
+        return
+    try:
+        dt.datetime.fromisoformat(value)
+    except ValueError:
+        fail(f"invalid {field}: {value}")
+
+
+def safe_file(filename):
+    path = Path(filename)
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError:
+        fail(f"missing callback file: {path}")
+    notes = (STODO_DIR / "notes").resolve()
+    if resolved.parent != notes:
+        fail(f"refusing path outside task notes directory: {path}")
+    if path.is_symlink() or not resolved.is_file():
+        fail(f"refusing unsafe task file: {path}")
+    return resolved
+
+
+def validate_task_values(task, key):
+    for field in TASK_FIELDS:
+        if field not in task:
+            fail(f"{key}: missing required field: {field}")
+    if not task["title"].strip():
+        fail(f"{key}: title must not be empty")
+    parse_date(task["due"])
+    if task["priority"] not in {"A", "B", "C"}:
+        fail(f"{key}: priority must be A, B, or C")
+    validate_timestamp(task["created"], "created")
+    validate_timestamp(task["completed"], "completed")
+
+
+def parse_task(filename):
+    path = safe_file(filename)
+    text = path.read_text(encoding="utf-8")
+    header, separator, body = text.partition("\n---\n")
+    if not separator:
+        fail(f"{path.stem}: missing metadata separator")
+    task = {}
+    for line in header.splitlines():
+        if ": " not in line:
+            fail(f"{path.stem}: invalid metadata line: {line}")
+        name, value = line.split(": ", 1)
+        task[name] = value
+    validate_task_values(task, path.stem)
+    task.update({"_body": body, "_path": path, "_key": path.stem})
+    return task
+
+
+def write_task(task):
+    path = task["_path"]
+    data = "".join(f"{field}: {task[field]}\n" for field in TASK_FIELDS)
+    data += "---\n" + task.get("_body", "")
+    fd, temporary = tempfile.mkstemp(prefix=".stodo-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(data)
+        os.replace(temporary, path)
     finally:
-        if os.path.exists(tmp): os.unlink(tmp)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
-def callback_cmd(name,*extra):
-    return f'{shlex_quote(sys.executable)} {shlex_quote(SELF)} __{name}' + ''.join(' '+shlex_quote(x) for x in extra)
 
-def shlex_quote(s):
-    import shlex; return shlex.quote(str(s))
+def task_is_done(task):
+    return task["completed"] != "-"
 
-def hook(name, sels, *extra):
-    sclipple('--editor', callback_cmd(name,*extra), *sels)
 
-def event(key, action, detail=''):
-    f=STODO_DIR/'.stodo-events.tsv'
-    with f.open('a',encoding='utf-8') as h:
-        h.write(f'{now()}\t{key}\t{action}\t{detail}\n')
-
-def cmd_add(a):
-    keys=list_keys(); words=list(a.title)
-    if words and words[0]=='--': words=words[1:]
-    title=' '.join(words).strip()
-    if not title: fail('missing title')
-    if a.key:
-        if not VALID_KEY.match(a.key): fail('KEY must contain only ASCII letters, digits, _ or -')
-        if a.key in keys: fail(f'KEY already exists: {a.key}')
-        key=a.key
+def render_list(tasks, filters):
+    mode = filters["mode"]
+    rows = []
+    for task in tasks:
+        done = task_is_done(task)
+        due = parse_date(task["due"])
+        if mode == "open" and done:
+            continue
+        if mode == "done" and not done:
+            continue
+        if filters.get("due") is not None and task["due"] != filters["due"]:
+            continue
+        if filters.get("priority") is not None and task["priority"] != filters["priority"]:
+            continue
+        if filters.get("overdue") and (done or due is None or due >= today()):
+            continue
+        rows.append(task)
+    rank = {"A": 0, "B": 1, "C": 2}
+    rows.sort(key=lambda task: (
+        rank[task["priority"]], parse_date(task["due"]) or dt.date.max,
+        task["_key"],
+    ))
+    show_state = mode == "all"
+    if show_state:
+        print(f"{'S':1}  {'P':1}  {'DUE':10}  {'KEY':24}  TITLE")
+        print(f"{'-':1}  {'-':1}  {'-' * 10}  {'-' * 24}  {'-' * 5}")
     else:
-        base=slugify(title)
-        key=unique_key(base,keys) if base else fallback_key(keys)
-    cmd=[SCLIPPLE,'--directory',str(STODO_DIR),'add',key,'-t','task']
-    for t in a.tags: cmd += ['-t',t]
-    p=run(cmd,capture=True)
-    env=os.environ.copy(); env.update({
-        'STODO_INIT_TITLE':title,'STODO_INIT_CREATED':now(),'STODO_INIT_DUE':a.due,
-        'STODO_INIT_PRIORITY':a.priority,'STODO_INIT_STATUS':a.status})
-    cb=f'{shlex_quote(sys.executable)} {shlex_quote(SELF)} __init'
-    q=subprocess.run([SCLIPPLE,'--directory',str(STODO_DIR),'--editor',cb,key],env=env,text=True,
-                     stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    if q.returncode: fail(q.stderr.strip() or 'initialization failed')
-    event(key,'add',title); print(key)
+        print(f"{'P':1}  {'DUE':10}  {'KEY':24}  TITLE")
+        print(f"{'-':1}  {'-' * 10}  {'-' * 24}  {'-' * 5}")
+    for task in rows:
+        state = f"{'x' if task_is_done(task) else ' ':1}  " if show_state else ""
+        print(f"{state}{task['priority']:1}  {task['due']:10.10}  "
+              f"{task['_key']:24.24}  {task['title']}")
 
-def cmd_open(a): sclipple(*selectors(a))
-def cmd_ls(a): sclipple('ls',*selectors(a))
-def cmd_raw(a): sclipple('--editor','cat',*selectors(a))
-def cmd_agenda(a): hook('view',selectors(a),'agenda')
-def cmd_status_view(a,status): hook('view',selectors(a),status)
-def cmd_ready(a): hook('view',selectors(a),'ready')
-def cmd_blocked(a): hook('view',selectors(a),'blocked')
-def cmd_overdue(a): hook('view',selectors(a),'overdue')
-def cmd_stats(a): hook('stats',selectors(a))
 
-def cmd_transition(a,status):
-    sels=selectors(a,require=True); hook('setstatus',sels,status)
-def cmd_setfield(a,field,value): hook('setfield',selectors(a,require=True),field,value)
-def cmd_note(a):
-    key=resolve_key(a.key); hook('note',[key],a.text)
-def cmd_depend(a):
-    key=resolve_key(a.key); deps=[resolve_key(x) for x in a.deps]
-    hook('setfield',[key],'depends',' '.join(deps) if deps else '-')
-def cmd_undepend(a): cmd_setfield(argparse.Namespace(keys=[a.key],tags=[],tag_match=None),'depends','-')
-def cmd_tag(a,remove=False):
-    keys=[resolve_key(k) for k in a.keys]
-    if not keys: fail('KEY required')
-    sclipple('untag' if remove else 'tag',*keys,'-t',a.tag)
-    for k in keys: event(k,'untag' if remove else 'tag',a.tag)
-def cmd_archive(a): cmd_transition(a,'archived')
-def cmd_remove(a): cmd_transition(a,'trash')
-def cmd_restore(a): cmd_transition(a,'next')
-def cmd_purge(a):
-    sels=selectors(a,require=True)
-    # sclipple owns deletion/index consistency.
-    sclipple('rm',*sels)
-def cmd_history(a):
-    f=STODO_DIR/'.stodo-events.tsv'
-    if not f.exists(): return
-    key=resolve_key(a.key) if a.key else None
-    for ln in f.read_text(encoding='utf-8').splitlines():
-        if not key or ('\t'+key+'\t') in ln: print(ln)
+def render_show(task):
+    completed = task["completed"] if task_is_done(task) else "no"
+    print(f"key:        {task['_key']}")
+    print(f"title:      {task['title']}")
+    print(f"created:    {task['created']}")
+    print(f"due:        {task['due']}")
+    print(f"priority:   {task['priority']}")
+    print(f"completed:  {completed}")
+    if task["_body"]:
+        print()
+        print(task["_body"], end="" if task["_body"].endswith("\n") else "\n")
 
-def dep_done(key):
-    keys=list_keys()
-    if key not in keys: return False
-    # Ask sclipple to cat exact task, avoiding knowledge of index; parse temporary stdout.
-    p=sclipple('--editor','cat',key,capture=True)
-    for ln in p.stdout.splitlines():
-        if ln.startswith('status: '): return ln[8:] in TERMINAL
-    return False
 
-def is_blocked(t):
-    deps=[x for x in t.get('depends','-').split() if x!='-']
-    return any(not dep_done(k) for k in deps)
+def title_from_remainder(words):
+    words = list(words)
+    if words[:1] == ["--"]:
+        words = words[1:]
+    title = " ".join(words).strip()
+    if not title:
+        fail("missing title")
+    return title
 
-def due_date(v):
-    try: return dt.date.fromisoformat(v)
-    except Exception: return None
 
-def render(tasks, mode):
-    rows=[]
-    for t in tasks:
-        st=t.get('status','?'); blocked=is_blocked(t)
-        due=due_date(t.get('due','-'))
-        ok=False
-        if mode=='agenda': ok=st not in {'archived','trash'}
-        elif mode in {'inbox','today','waiting','done','next'}: ok=(st==mode)
-        elif mode=='ready': ok=(st in {'next','today','inbox'} and not blocked)
-        elif mode=='blocked': ok=(st not in TERMINAL and blocked)
-        elif mode=='overdue': ok=(st not in TERMINAL and due is not None and due < today())
-        if ok: rows.append(t)
-    rank={'A':0,'B':1,'C':2}
-    rows.sort(key=lambda t:(rank.get(t.get('priority'),9), due_date(t.get('due','-')) or dt.date.max, t['_key']))
-    print(f"{'STATUS':10} {'P':1} {'DUE':10} {'KEY':24} TITLE")
-    print(f"{'-'*10} {'-':1} {'-'*10} {'-'*24} {'-'*5}")
-    for t in rows:
-        st=t.get('status','?') + ('*' if is_blocked(t) else '')
-        print(f"{st:10.10} {t.get('priority','-'):1.1} {t.get('due','-'):10.10} {t['_key']:24.24} {t.get('title','')}")
+def cmd_add(args):
+    title = title_from_remainder(args.title)
+    parse_date(args.due)
+    keys = list_keys()
+    if args.key:
+        validate_key(args.key)
+        if args.key in keys:
+            fail(f"KEY already exists: {args.key}")
+        key = args.key
+    else:
+        base = slugify(title)
+        key = unique_key(base, keys) if base else fallback_key(keys)
+    command = ["add", key, "-t", TASK_TAG]
+    for tag in args.tags:
+        command.extend(("-t", tag))
+    run_sclipple(*command, capture=True)
+    payload = json.dumps({
+        "title": title, "created": now(), "due": args.due,
+        "priority": args.priority, "completed": "-",
+    }, ensure_ascii=False, separators=(",", ":"))
+    editor = callback_command("__create", key, payload)
+    initialized = run_sclipple(key, editor=editor, capture=True, check=False)
+    if initialized.returncode:
+        run_sclipple("rm", key, capture=True, check=False)
+        fail((initialized.stderr or "").strip() or "task initialization failed")
+    print(key)
 
-def cb_init(files):
-    if len(files)!=1: fail('__init expects one file')
-    p=safe_file(files[0]);
-    if p.stat().st_size: fail('refusing to initialize non-empty file')
-    t={'_path':p,'_body':'','title':os.environ['STODO_INIT_TITLE'],'created':os.environ['STODO_INIT_CREATED'],
-       'due':os.environ['STODO_INIT_DUE'],'priority':os.environ['STODO_INIT_PRIORITY'],
-       'status':os.environ['STODO_INIT_STATUS'],'status_since':os.environ['STODO_INIT_CREATED'],
-       'completed':'-','depends':'-'}
-    write_task(t)
 
-def cb_view(mode,files): render([parse_task(f) for f in files],mode)
-def cb_stats(files):
-    ts=[parse_task(f) for f in files]; counts={}
-    for t in ts: counts[t.get('status','other')]=counts.get(t.get('status','other'),0)+1
-    ready=sum(t.get('status') in {'next','today','inbox'} and not is_blocked(t) for t in ts)
-    overdue=sum(t.get('status') not in TERMINAL and (due_date(t.get('due','-')) or dt.date.max)<today() for t in ts)
-    print(f'total\t{len(ts)}'); print(f'ready\t{ready}'); print(f'overdue\t{overdue}')
-    for k in sorted(counts): print(f'{k}\t{counts[k]}')
-def cb_setstatus(status,files):
-    ts=now()
-    for f in files:
-        t=parse_task(f); old=t.get('status','-'); t['status']=status; t['status_since']=ts
-        t['completed']=ts if status=='done' else ('-' if old=='done' else t.get('completed','-'))
-        write_task(t); event(t['_key'],'status',f'{old}->{status}')
-def cb_setfield(field,value,files):
-    if field not in {'due','priority','depends'}: fail(f'unsupported field: {field}')
-    for f in files:
-        t=parse_task(f); old=t.get(field,'-'); t[field]=value; write_task(t); event(t['_key'],field,f'{old}->{value}')
-def cb_note(text,files):
-    ts=now()
-    for f in files:
-        t=parse_task(f); body=t.get('_body','')
-        if body and not body.endswith('\n'): body+='\n'
-        t['_body']=body+f'{ts}  {text}\n'; write_task(t); event(t['_key'],'note',text)
+def ls_selectors(args):
+    keys = list_keys()
+    if not keys:
+        return None
+    selectors = [resolve_key(key, keys) for key in args.keys]
+    for tag in args.tags:
+        selectors.extend(("-t", tag))
+    if args.tag_match:
+        selectors.extend(("--tag-match", args.tag_match))
+    return selectors or ["-t", TASK_TAG]
 
-def add_selector(p, keys=True):
-    if keys: p.add_argument('keys',nargs='*')
-    p.add_argument('-t','--tag',dest='tags',action='append',default=[])
-    p.add_argument('--tag-match',choices=['and','or'])
 
-def parser():
-    p=argparse.ArgumentParser(prog='stodo')
-    sp=p.add_subparsers(dest='cmd',required=True)
-    sp.add_parser('init')
-    a=sp.add_parser('add'); a.add_argument('-k','--key'); a.add_argument('-p','--priority',default='B',choices=['A','B','C']); a.add_argument('-d','--due',default='-'); a.add_argument('-s','--status',default='inbox'); a.add_argument('-t','--tag',dest='tags',action='append',default=[]); a.add_argument('title',nargs=argparse.REMAINDER)
-    for name in ['open','ls','raw','agenda','inbox','today','waiting','completed','queued','ready','blocked','overdue','stats']:
-        q=sp.add_parser(name); add_selector(q)
-    for name in ['start','next','wait','done','archive','remove','restore']:
-        q=sp.add_parser(name); add_selector(q)
-    for name,field in [('set-due','due'),('set-priority','priority')]:
-        q=sp.add_parser(name); q.add_argument('value'); add_selector(q)
-    q=sp.add_parser('note'); q.add_argument('key'); q.add_argument('text')
-    q=sp.add_parser('depend'); q.add_argument('key'); q.add_argument('deps',nargs='+')
-    q=sp.add_parser('undepend'); q.add_argument('key')
-    for name in ['tag','untag']:
-        q=sp.add_parser(name); q.add_argument('tag'); q.add_argument('keys',nargs='+')
-    q=sp.add_parser('purge'); add_selector(q)
-    q=sp.add_parser('history'); q.add_argument('key',nargs='?')
-    return p
+def cmd_ls(args):
+    if args.due is not None:
+        parse_date(args.due)
+    filters = {
+        "mode": "all" if args.all else "done" if args.done else "open",
+        "due": args.due, "priority": args.priority, "overdue": args.overdue,
+    }
+    selectors = ls_selectors(args)
+    if selectors is None:
+        render_list([], filters)
+    else:
+        callback("list", selectors, json.dumps(filters, separators=(",", ":")))
+
+
+def cmd_show(args):
+    key = resolve_key(args.key)
+    callback("show", [key], key)
+
+
+def cmd_set(args):
+    key = resolve_key(args.key)
+    if args.due is not None:
+        parse_date(args.due)
+    updates = {}
+    if args.title is not None:
+        title = args.title.strip()
+        if not title:
+            fail("title must not be empty")
+        updates["title"] = title
+    if args.due is not None:
+        updates["due"] = args.due
+    if args.clear_due:
+        updates["due"] = "-"
+    if args.priority is not None:
+        updates["priority"] = args.priority
+    if not updates:
+        fail("no changes requested")
+    callback("set", [key], key, json.dumps(
+        updates, ensure_ascii=False, separators=(",", ":")
+    ))
+
+
+def cmd_completion(args, completed):
+    keys = list_keys()
+    callback("complete", [resolve_key(key, keys) for key in args.keys], completed)
+
+
+def cb_create(expected_key, payload, files):
+    if len(files) != 1:
+        fail("task creator expects exactly one file")
+    path = safe_file(files[0])
+    if path.stem != expected_key:
+        fail("task creator received an unexpected key")
+    if path.stat().st_size:
+        fail("refusing to initialize a non-empty task")
+    try:
+        values = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        fail(f"invalid internal task data: {exc}")
+    if set(values) != set(TASK_FIELDS) or not all(
+        isinstance(value, str) for value in values.values()
+    ):
+        fail("invalid internal task data")
+    validate_task_values(values, expected_key)
+    write_task({**values, "_path": path, "_body": ""})
+
+
+def cb_list(encoded_filters, files):
+    try:
+        filters = json.loads(encoded_filters)
+    except json.JSONDecodeError as exc:
+        fail(f"invalid internal list request: {exc}")
+    render_list([parse_task(filename) for filename in files], filters)
+
+
+def cb_show(expected_key, files):
+    if len(files) != 1:
+        fail("show expects exactly one task")
+    task = parse_task(files[0])
+    if task["_key"] != expected_key:
+        fail("show received an unexpected key")
+    render_show(task)
+
+
+def cb_set(expected_key, encoded_updates, files):
+    if len(files) != 1:
+        fail("set expects exactly one task")
+    task = parse_task(files[0])
+    if task["_key"] != expected_key:
+        fail("set received an unexpected key")
+    try:
+        updates = json.loads(encoded_updates)
+    except json.JSONDecodeError as exc:
+        fail(f"invalid internal update request: {exc}")
+    if not isinstance(updates, dict) or not set(updates).issubset(
+        {"title", "due", "priority"}
+    ):
+        fail("invalid internal update request")
+    task.update(updates)
+    validate_task_values(task, expected_key)
+    write_task(task)
+
+
+def cb_complete(completed, files):
+    for filename in files:
+        task = parse_task(filename)
+        if completed == "-" or not task_is_done(task):
+            task["completed"] = completed
+            write_task(task)
+
+
+def add_selectors(parser):
+    parser.add_argument("keys", nargs="*")
+    parser.add_argument("-t", "--tag", dest="tags", action="append", default=[])
+    parser.add_argument("--tag-match", choices=("and", "or"))
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="stodo", description="task-aware facade over a dedicated sclipple store",
+        epilog=("Commands not owned by stodo are forwarded unchanged to sclipple. "
+                "Use 'stodo native ...' only for a shadowed sclipple command."),
+    )
+    sub = parser.add_subparsers(dest="command")
+    add = sub.add_parser("add", help="add a task")
+    add.add_argument("-k", "--key")
+    add.add_argument("-d", "--due", default="-")
+    add.add_argument("-p", "--priority", choices=("A", "B", "C"), default="B")
+    add.add_argument("-t", "--tag", dest="tags", action="append", default=[])
+    add.add_argument("title", nargs=argparse.REMAINDER)
+
+    ls = sub.add_parser("ls", help="list parsed tasks")
+    add_selectors(ls)
+    mode = ls.add_mutually_exclusive_group()
+    mode.add_argument("--all", action="store_true")
+    mode.add_argument("--done", action="store_true")
+    ls.add_argument("--overdue", action="store_true")
+    ls.add_argument("--due")
+    ls.add_argument("--priority", choices=("A", "B", "C"))
+
+    show = sub.add_parser("show", help="show one parsed task")
+    show.add_argument("key")
+    update = sub.add_parser("set", help="update task metadata")
+    update.add_argument("key")
+    update.add_argument("--title")
+    due = update.add_mutually_exclusive_group()
+    due.add_argument("--due")
+    due.add_argument("--clear-due", action="store_true")
+    update.add_argument("--priority", choices=("A", "B", "C"))
+    done = sub.add_parser("done", help="mark tasks completed")
+    done.add_argument("keys", nargs="+")
+    reopen = sub.add_parser("reopen", help="mark tasks incomplete")
+    reopen.add_argument("keys", nargs="+")
+    return parser
+
+
+def run_internal(argv):
+    ensure_store()
+    command = argv[0]
+    if command == "__create":
+        cb_create(argv[1], argv[2], argv[3:])
+    elif command == "__list":
+        cb_list(argv[1], argv[2:])
+    elif command == "__show":
+        cb_show(argv[1], argv[2:])
+    elif command == "__set":
+        cb_set(argv[1], argv[2], argv[3:])
+    elif command == "__complete":
+        cb_complete(argv[1], argv[2:])
+    else:
+        fail(f"unknown internal callback: {command}")
+
 
 def main(argv):
-    # hidden callback API: callback-specific args precede selected filenames.
-    if argv and argv[0].startswith('__'):
-        check_root(); cmd=argv[0]
-        if cmd=='__init': cb_init(argv[1:]); return
-        if cmd=='__view': cb_view(argv[1],argv[2:]); return
-        if cmd=='__stats': cb_stats(argv[1:]); return
-        if cmd=='__setstatus': cb_setstatus(argv[1],argv[2:]); return
-        if cmd=='__setfield': cb_setfield(argv[1],argv[2],argv[3:]); return
-        if cmd=='__note': cb_note(argv[1],argv[2:]); return
-        fail(f'unknown callback: {cmd}')
-    a=parser().parse_args(argv)
-    if a.cmd=='init': return init_root()
-    check_root()
-    if a.cmd=='add': return cmd_add(a)
-    if a.cmd=='open': return cmd_open(a)
-    if a.cmd=='ls': return cmd_ls(a)
-    if a.cmd=='raw': return cmd_raw(a)
-    if a.cmd=='agenda': return cmd_agenda(a)
-    if a.cmd in {'inbox','today','waiting'}: return cmd_status_view(a,a.cmd)
-    if a.cmd=='completed': return cmd_status_view(a,'done')
-    if a.cmd=='queued': return cmd_status_view(a,'next')
-    if a.cmd=='ready': return cmd_ready(a)
-    if a.cmd=='blocked': return cmd_blocked(a)
-    if a.cmd=='overdue': return cmd_overdue(a)
-    if a.cmd=='stats': return cmd_stats(a)
-    if a.cmd=='start': return cmd_transition(a,'today')
-    if a.cmd=='next': return cmd_transition(a,'next')
-    if a.cmd=='wait': return cmd_transition(a,'waiting')
-    if a.cmd=='done': return cmd_transition(a,'done')
-    if a.cmd=='archive': return cmd_archive(a)
-    if a.cmd=='remove': return cmd_remove(a)
-    if a.cmd=='restore': return cmd_restore(a)
-    if a.cmd=='set-due': return cmd_setfield(a,'due',a.value)
-    if a.cmd=='set-priority': return cmd_setfield(a,'priority',a.value)
-    if a.cmd=='note': return cmd_note(a)
-    if a.cmd=='depend': return cmd_depend(a)
-    if a.cmd=='undepend': return cmd_undepend(a)
-    if a.cmd=='tag': return cmd_tag(a)
-    if a.cmd=='untag': return cmd_tag(a,True)
-    if a.cmd=='purge': return cmd_purge(a)
-    if a.cmd=='history': return cmd_history(a)
+    if argv and argv[0].startswith("__"):
+        run_internal(argv)
+        return 0
+    if argv[:1] == ["native"]:
+        return run_native(argv[1:])
+    if not argv or argv in (["-h"], ["--help"]):
+        build_parser().print_help()
+        return 0
+    if argv[0] not in OWNED_COMMANDS:
+        return run_native(argv)
+    args = build_parser().parse_args(argv)
+    if args.command == "add":
+        cmd_add(args)
+    elif args.command == "ls":
+        cmd_ls(args)
+    elif args.command == "show":
+        cmd_show(args)
+    elif args.command == "set":
+        cmd_set(args)
+    elif args.command == "done":
+        cmd_completion(args, now())
+    elif args.command == "reopen":
+        cmd_completion(args, "-")
+    return 0
 
-if __name__=='__main__':
-    try: main(sys.argv[1:])
-    except Error as e:
-        print(f'stodo: {e}',file=sys.stderr); sys.exit(1)
-    except KeyboardInterrupt: sys.exit(130)
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except Error as exc:
+        print(f"stodo: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    except FileNotFoundError as exc:
+        print(f"stodo: command not found: {exc.filename}", file=sys.stderr)
+        raise SystemExit(127)
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+
+
