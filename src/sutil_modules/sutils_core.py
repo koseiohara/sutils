@@ -204,14 +204,36 @@ def write_directory_callback(target, files):
     Path(files[0]).write_text(target + "\n", encoding="utf-8")
 
 
+def current_logical_directory():
+    physical = os.getcwd()
+    logical = os.environ.get("PWD")
+
+    if logical and os.path.isabs(logical):
+        try:
+            if os.path.samefile(logical, physical):
+                return os.path.normpath(logical)
+        except OSError:
+            pass
+
+    return physical
+
+
+def make_absolute_path(path, base):
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        return os.path.normpath(expanded)
+    return os.path.normpath(os.path.join(base, expanded))
+
+
 def scd_add(arguments):
     if len(arguments) < 2:
         error("usage: scd add KEY [DIRECTORY]")
         return 2
 
     key = arguments[1]
-    target_input = arguments[2] if len(arguments) >= 3 else os.getcwd()
-    target = os.path.abspath(os.path.expanduser(target_input))
+    base = current_logical_directory()
+    target_input = arguments[2] if len(arguments) >= 3 else base
+    target = make_absolute_path(target_input, base)
 
     if not os.path.isdir(target):
         error(f"not a directory: {target_input}")
@@ -321,3 +343,5 @@ if __name__ == "__main__":
         raise SystemExit(1)
     except KeyboardInterrupt:
         raise SystemExit(130)
+
+
