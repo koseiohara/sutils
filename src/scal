@@ -1,0 +1,20 @@
+# Source this file from Bash or zsh.
+
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '_scal_source=${${(%):-%x}:A}'
+elif [ -n "${BASH_VERSION-}" ]; then
+    _scal_source=${BASH_SOURCE[0]}
+else
+    printf '%s\n' 'scal: only Bash and zsh are supported' >&2
+    return 2
+fi
+
+_SUTILS_SCAL_ROOT=$(
+    builtin cd -P -- "$(dirname -- "$_scal_source")" && pwd
+) || return
+unset _scal_source
+
+scal()
+{
+    command python3 "$_SUTILS_SCAL_ROOT/sutil_modules/scal.py" "$@"
+}

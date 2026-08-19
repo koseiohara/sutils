@@ -1,5 +1,6 @@
 # Source this file from ~/.zshrc or ~/.bashrc. Locate the other files relative
 # to this loader so the whole directory can be installed anywhere.
+
 if [ -n "${ZSH_VERSION-}" ]; then
     eval '_sutils_source=${${(%):-%x}:A}'
 elif [ -n "${BASH_VERSION-}" ]; then
@@ -17,4 +18,5 @@ unset _sutils_source
 source "$_sutils_root/srun"
 source "$_sutils_root/scd"
 source "$_sutils_root/stodo"
+source "$_sutils_root/scal"
 unset _sutils_root
