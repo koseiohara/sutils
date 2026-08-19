@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""A task-aware, deliberately thin facade over a dedicated sclipple store."""
+"""A task-aware, deliberately thin facade over a dedicated sclipple store.
+
+CLI due dates accept DD, MM-DD, and YYYY-MM-DD and are stored as ISO dates.
+"""
 
 import argparse
 import datetime as dt
@@ -20,6 +23,9 @@ STODO_EXTENSION = "txt"
 TASK_TAG = "task"
 SELF = str(Path(__file__).resolve())
 VALID_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+DAY_INPUT = re.compile(r"^[0-9]{2}$")
+MONTH_DAY_INPUT = re.compile(r"^[0-9]{2}-[0-9]{2}$")
+ISO_DATE_INPUT = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 TASK_FIELDS = ("title", "created", "due", "priority", "completed")
 OWNED_COMMANDS = {"add", "ls", "show", "set", "done", "reopen"}
 
@@ -149,13 +155,41 @@ def fallback_key(keys):
     return f"task-{suffix}"
 
 
-def parse_date(value, field="due"):
+def parse_stored_date(value, field="due"):
     if value == "-":
         return None
+    if not ISO_DATE_INPUT.fullmatch(value):
+        fail(f"invalid {field}: {value}; expected YYYY-MM-DD or -")
     try:
         return dt.date.fromisoformat(value)
     except ValueError:
         fail(f"invalid {field}: {value}; expected YYYY-MM-DD or -")
+
+
+def normalize_date_input(value, field="due", base=None):
+    """Normalize DD, MM-DD, or YYYY-MM-DD against the local current date."""
+    if value == "-":
+        return value
+    base = base or today()
+    try:
+        if DAY_INPUT.fullmatch(value):
+            parsed = dt.date(base.year, base.month, int(value))
+        elif MONTH_DAY_INPUT.fullmatch(value):
+            month, day = map(int, value.split("-"))
+            parsed = dt.date(base.year, month, day)
+        elif ISO_DATE_INPUT.fullmatch(value):
+            parsed = dt.date.fromisoformat(value)
+        else:
+            fail(
+                f"invalid {field}: {value}; expected DD, MM-DD, "
+                "YYYY-MM-DD, or -"
+            )
+    except ValueError:
+        fail(
+            f"invalid {field}: {value}; expected a valid DD, MM-DD, "
+            "YYYY-MM-DD, or -"
+        )
+    return parsed.isoformat()
 
 
 def validate_timestamp(value, field):
@@ -187,7 +221,7 @@ def validate_task_values(task, key):
             fail(f"{key}: missing required field: {field}")
     if not task["title"].strip():
         fail(f"{key}: title must not be empty")
-    parse_date(task["due"])
+    parse_stored_date(task["due"])
     if task["priority"] not in {"A", "B", "C"}:
         fail(f"{key}: priority must be A, B, or C")
     validate_timestamp(task["created"], "created")
@@ -234,7 +268,7 @@ def render_list(tasks, filters):
     rows = []
     for task in tasks:
         done = task_is_done(task)
-        due = parse_date(task["due"])
+        due = parse_stored_date(task["due"])
         if mode == "open" and done:
             continue
         if mode == "done" and not done:
@@ -248,7 +282,7 @@ def render_list(tasks, filters):
         rows.append(task)
     rank = {"A": 0, "B": 1, "C": 2}
     rows.sort(key=lambda task: (
-        rank[task["priority"]], parse_date(task["due"]) or dt.date.max,
+        rank[task["priority"]], parse_stored_date(task["due"]) or dt.date.max,
         task["_key"],
     ))
     show_state = mode == "all"
@@ -289,7 +323,7 @@ def title_from_remainder(words):
 
 def cmd_add(args):
     title = title_from_remainder(args.title)
-    parse_date(args.due)
+    due = normalize_date_input(args.due)
     keys = list_keys()
     if args.key:
         validate_key(args.key)
@@ -304,7 +338,7 @@ def cmd_add(args):
         command.extend(("-t", tag))
     run_sclipple(*command, capture=True)
     payload = json.dumps({
-        "title": title, "created": now(), "due": args.due,
+        "title": title, "created": now(), "due": due,
         "priority": args.priority, "completed": "-",
     }, ensure_ascii=False, separators=(",", ":"))
     editor = callback_command("__create", key, payload)
@@ -328,11 +362,10 @@ def ls_selectors(args):
 
 
 def cmd_ls(args):
-    if args.due is not None:
-        parse_date(args.due)
+    due = normalize_date_input(args.due) if args.due is not None else None
     filters = {
         "mode": "all" if args.all else "done" if args.done else "open",
-        "due": args.due, "priority": args.priority, "overdue": args.overdue,
+        "due": due, "priority": args.priority, "overdue": args.overdue,
     }
     selectors = ls_selectors(args)
     if selectors is None:
@@ -348,8 +381,6 @@ def cmd_show(args):
 
 def cmd_set(args):
     key = resolve_key(args.key)
-    if args.due is not None:
-        parse_date(args.due)
     updates = {}
     if args.title is not None:
         title = args.title.strip()
@@ -357,7 +388,7 @@ def cmd_set(args):
             fail("title must not be empty")
         updates["title"] = title
     if args.due is not None:
-        updates["due"] = args.due
+        updates["due"] = normalize_date_input(args.due)
     if args.clear_due:
         updates["due"] = "-"
     if args.priority is not None:
@@ -538,5 +569,6 @@ if __name__ == "__main__":
         raise SystemExit(127)
     except KeyboardInterrupt:
         raise SystemExit(130)
+
 
 
