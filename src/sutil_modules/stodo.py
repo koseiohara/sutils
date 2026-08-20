@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import struct
 import subprocess
 import sys
 import tempfile
@@ -22,12 +23,15 @@ STODO_DIR = Path(os.environ.get(
 STODO_EXTENSION = "txt"
 TASK_TAG = "task"
 SELF = str(Path(__file__).resolve())
+CAPTURE_MAGIC = b"STODO-CAPTURE-V1\0"
+INTERNAL_ENV = "_STODO_INTERNAL_CALLBACK"
 VALID_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 DAY_INPUT = re.compile(r"^[0-9]{2}$")
 MONTH_DAY_INPUT = re.compile(r"^[0-9]{2}-[0-9]{2}$")
 ISO_DATE_INPUT = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 TASK_FIELDS = ("title", "created", "due", "priority", "completed")
 OWNED_COMMANDS = {"add", "ls", "show", "set", "done", "reopen"}
+INTERNAL_COMMANDS = {"__capture", "__create", "__set", "__complete"}
 
 
 class Error(Exception):
@@ -72,13 +76,14 @@ def sclipple_command(*arguments, editor=None):
     return command
 
 
-def run_sclipple(*arguments, editor=None, capture=False, check=True):
+def run_sclipple(*arguments, editor=None, capture=False, check=True, env=None):
     ensure_store()
     fixed_options_are_valid(arguments)
     process = subprocess.run(
         sclipple_command(*arguments, editor=editor), text=True,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
+        env=env,
     )
     if check and process.returncode:
         message = (process.stderr or "").strip() if capture else ""
@@ -97,13 +102,23 @@ def callback_command(name, *arguments):
     return " ".join(shlex.quote(word) for word in words)
 
 
+def callback_environment():
+    environment = os.environ.copy()
+    environment[INTERNAL_ENV] = "1"
+    return environment
+
+
 def callback(name, selectors, *arguments):
-    run_sclipple(*selectors, editor=callback_command(f"__{name}", *arguments))
+    run_sclipple(
+        *selectors,
+        editor=callback_command(f"__{name}", *arguments),
+        env=callback_environment(),
+    )
 
 
-def list_keys():
+def list_keys(selectors=()):
     """Ask sclipple for keys; never discover or construct note filenames."""
-    process = run_sclipple("ls", "--short", capture=True, check=False)
+    process = run_sclipple("ls", "--short", *selectors, capture=True, check=False)
     if process.returncode and not process.stdout.strip():
         return []
     keys = []
@@ -201,18 +216,12 @@ def validate_timestamp(value, field):
         fail(f"invalid {field}: {value}")
 
 
-def safe_file(filename):
+def callback_file(filename):
+    """Validate a callback-supplied path without assuming where it lives."""
     path = Path(filename)
-    try:
-        resolved = path.resolve(strict=True)
-    except FileNotFoundError:
-        fail(f"missing callback file: {path}")
-    notes = (STODO_DIR / "notes").resolve()
-    if resolved.parent != notes:
-        fail(f"refusing path outside task notes directory: {path}")
-    if path.is_symlink() or not resolved.is_file():
+    if path.is_symlink() or not path.is_file():
         fail(f"refusing unsafe task file: {path}")
-    return resolved
+    return path
 
 
 def validate_task_values(task, key):
@@ -228,25 +237,24 @@ def validate_task_values(task, key):
     validate_timestamp(task["completed"], "completed")
 
 
-def parse_task(filename):
-    path = safe_file(filename)
-    text = path.read_text(encoding="utf-8")
+def parse_task_text(key, text):
     header, separator, body = text.partition("\n---\n")
     if not separator:
-        fail(f"{path.stem}: missing metadata separator")
+        fail(f"{key}: missing metadata separator")
     task = {}
     for line in header.splitlines():
         if ": " not in line:
-            fail(f"{path.stem}: invalid metadata line: {line}")
+            fail(f"{key}: invalid metadata line: {line}")
         name, value = line.split(": ", 1)
+        if name in task:
+            fail(f"{key}: duplicate metadata field: {name}")
         task[name] = value
-    validate_task_values(task, path.stem)
-    task.update({"_body": body, "_path": path, "_key": path.stem})
+    validate_task_values(task, key)
+    task.update({"_body": body, "_key": key})
     return task
 
 
-def write_task(task):
-    path = task["_path"]
+def write_task(path, task):
     data = "".join(f"{field}: {task[field]}\n" for field in TASK_FIELDS)
     data += "---\n" + task.get("_body", "")
     fd, temporary = tempfile.mkstemp(prefix=".stodo-", dir=path.parent)
@@ -257,6 +265,61 @@ def write_task(task):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def capture_callback(fd, files):
+    if len(files) != 1:
+        fail("capture expects exactly one task file")
+    data = callback_file(files[0]).read_bytes()
+    with os.fdopen(fd, "wb", closefd=True) as output:
+        output.write(CAPTURE_MAGIC)
+        output.write(struct.pack("!Q", len(data)))
+        output.write(data)
+
+
+def decode_capture(data):
+    if not data.startswith(CAPTURE_MAGIC):
+        fail("invalid response from capture callback")
+    position = len(CAPTURE_MAGIC)
+    if len(data) < position + 8:
+        fail("truncated capture response")
+    size = struct.unpack_from("!Q", data, position)[0]
+    position += 8
+    if position + size != len(data):
+        fail("invalid capture response length")
+    try:
+        return data[position:].decode("utf-8")
+    except UnicodeDecodeError:
+        fail("task is not valid UTF-8")
+
+
+def read_task(key):
+    """Read one exact KEY through sclipple's editor callback interface."""
+    read_fd, write_fd = os.pipe()
+    editor = callback_command("__capture", write_fd)
+    ensure_store()
+    try:
+        process = subprocess.Popen(
+            sclipple_command(key, editor=editor),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            pass_fds=(write_fd,),
+            env=callback_environment(),
+        )
+    except Exception:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise
+    os.close(write_fd)
+    try:
+        with os.fdopen(read_fd, "rb", closefd=True) as source:
+            captured = source.read()
+    finally:
+        _, stderr = process.communicate()
+    if process.returncode:
+        message = stderr.decode("utf-8", "replace").strip()
+        fail(message or f"failed to read KEY: {key}")
+    return parse_task_text(key, decode_capture(captured))
 
 
 def task_is_done(task):
@@ -342,23 +405,29 @@ def cmd_add(args):
         "priority": args.priority, "completed": "-",
     }, ensure_ascii=False, separators=(",", ":"))
     editor = callback_command("__create", key, payload)
-    initialized = run_sclipple(key, editor=editor, capture=True, check=False)
+    initialized = run_sclipple(
+        key,
+        editor=editor,
+        capture=True,
+        check=False,
+        env=callback_environment(),
+    )
     if initialized.returncode:
         run_sclipple("rm", key, capture=True, check=False)
         fail((initialized.stderr or "").strip() or "task initialization failed")
     print(key)
 
 
-def ls_selectors(args):
+def selected_keys(args):
     keys = list_keys()
     if not keys:
-        return None
+        return []
     selectors = [resolve_key(key, keys) for key in args.keys]
     for tag in args.tags:
         selectors.extend(("-t", tag))
     if args.tag_match:
         selectors.extend(("--tag-match", args.tag_match))
-    return selectors or ["-t", TASK_TAG]
+    return list_keys(selectors or ["-t", TASK_TAG])
 
 
 def cmd_ls(args):
@@ -367,16 +436,13 @@ def cmd_ls(args):
         "mode": "all" if args.all else "done" if args.done else "open",
         "due": due, "priority": args.priority, "overdue": args.overdue,
     }
-    selectors = ls_selectors(args)
-    if selectors is None:
-        render_list([], filters)
-    else:
-        callback("list", selectors, json.dumps(filters, separators=(",", ":")))
+    keys = selected_keys(args)
+    render_list([read_task(key) for key in keys], filters)
 
 
 def cmd_show(args):
     key = resolve_key(args.key)
-    callback("show", [key], key)
+    render_show(read_task(key))
 
 
 def cmd_set(args):
@@ -402,15 +468,15 @@ def cmd_set(args):
 
 def cmd_completion(args, completed):
     keys = list_keys()
-    callback("complete", [resolve_key(key, keys) for key in args.keys], completed)
+    for token in args.keys:
+        key = resolve_key(token, keys)
+        callback("complete", [key], key, completed)
 
 
 def cb_create(expected_key, payload, files):
     if len(files) != 1:
         fail("task creator expects exactly one file")
-    path = safe_file(files[0])
-    if path.stem != expected_key:
-        fail("task creator received an unexpected key")
+    path = callback_file(files[0])
     if path.stat().st_size:
         fail("refusing to initialize a non-empty task")
     try:
@@ -422,32 +488,14 @@ def cb_create(expected_key, payload, files):
     ):
         fail("invalid internal task data")
     validate_task_values(values, expected_key)
-    write_task({**values, "_path": path, "_body": ""})
-
-
-def cb_list(encoded_filters, files):
-    try:
-        filters = json.loads(encoded_filters)
-    except json.JSONDecodeError as exc:
-        fail(f"invalid internal list request: {exc}")
-    render_list([parse_task(filename) for filename in files], filters)
-
-
-def cb_show(expected_key, files):
-    if len(files) != 1:
-        fail("show expects exactly one task")
-    task = parse_task(files[0])
-    if task["_key"] != expected_key:
-        fail("show received an unexpected key")
-    render_show(task)
+    write_task(path, {**values, "_body": ""})
 
 
 def cb_set(expected_key, encoded_updates, files):
     if len(files) != 1:
         fail("set expects exactly one task")
-    task = parse_task(files[0])
-    if task["_key"] != expected_key:
-        fail("set received an unexpected key")
+    path = callback_file(files[0])
+    task = parse_task_text(expected_key, path.read_text(encoding="utf-8"))
     try:
         updates = json.loads(encoded_updates)
     except json.JSONDecodeError as exc:
@@ -458,15 +506,20 @@ def cb_set(expected_key, encoded_updates, files):
         fail("invalid internal update request")
     task.update(updates)
     validate_task_values(task, expected_key)
-    write_task(task)
+    write_task(path, task)
 
 
-def cb_complete(completed, files):
-    for filename in files:
-        task = parse_task(filename)
-        if completed == "-" or not task_is_done(task):
-            task["completed"] = completed
-            write_task(task)
+def cb_complete(expected_key, completed, files):
+    if len(files) != 1:
+        fail("completion update expects exactly one task")
+    path = callback_file(files[0])
+    task = parse_task_text(expected_key, path.read_text(encoding="utf-8"))
+    if completed == "-" and task_is_done(task):
+        task["completed"] = completed
+        write_task(path, task)
+    elif completed != "-" and not task_is_done(task):
+        task["completed"] = completed
+        write_task(path, task)
 
 
 def add_selectors(parser):
@@ -517,22 +570,24 @@ def build_parser():
 def run_internal(argv):
     ensure_store()
     command = argv[0]
-    if command == "__create":
+    if command == "__capture":
+        capture_callback(int(argv[1]), argv[2:])
+    elif command == "__create":
         cb_create(argv[1], argv[2], argv[3:])
-    elif command == "__list":
-        cb_list(argv[1], argv[2:])
-    elif command == "__show":
-        cb_show(argv[1], argv[2:])
     elif command == "__set":
         cb_set(argv[1], argv[2], argv[3:])
     elif command == "__complete":
-        cb_complete(argv[1], argv[2:])
+        cb_complete(argv[1], argv[2], argv[3:])
     else:
         fail(f"unknown internal callback: {command}")
 
 
 def main(argv):
-    if argv and argv[0].startswith("__"):
+    if (
+        os.environ.get(INTERNAL_ENV) == "1"
+        and argv
+        and argv[0] in INTERNAL_COMMANDS
+    ):
         run_internal(argv)
         return 0
     if argv[:1] == ["native"]:
@@ -569,6 +624,3 @@ if __name__ == "__main__":
         raise SystemExit(127)
     except KeyboardInterrupt:
         raise SystemExit(130)
-
-
-
